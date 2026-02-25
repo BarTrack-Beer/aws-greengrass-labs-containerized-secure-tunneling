@@ -1,0 +1,146 @@
+---
+RecipeFormatVersion: '2020-01-25'
+ComponentName: com.bartrack.SecureTunneling
+ComponentVersion: '1.0.21'
+ComponentDescription: 'AWS IoT Secure Tunneling for Greengrass Nucleus Lite 2.3.0 with Docker CE, ECR authentication, and IPC socket'
+ComponentPublisher: BarTrack
+ComponentDependencies:
+  aws.greengrass.TokenExchangeService:
+    VersionRequirement: '>=2.0.0'
+    DependencyType: HARD
+ComponentConfiguration:
+  DefaultConfiguration:
+    dockerImage: '362106343162.dkr.ecr.us-east-2.amazonaws.com/secure-tunneling:1.0.0'
+    containerName: 'secure-tunneling'
+Manifests:
+  - Platform:
+      os: linux
+      architecture: arm
+      runtime: aws_nucleus_lite
+    lifecycle:
+      run:
+        Script: |
+          #!/bin/bash
+          set -x  # Enable debug tracing
+          
+          echo "========================================="
+          echo "SecureTunneling Component Starting v1.0.17"
+          echo "========================================="
+          
+          # Configuration
+          CONTAINER_NAME="{configuration:/containerName}"
+          DOCKER_IMAGE="{configuration:/dockerImage}"
+          ECR_REGISTRY="362106343162.dkr.ecr.us-east-2.amazonaws.com"
+          
+          echo "DEBUG: Container name: $CONTAINER_NAME"
+          echo "DEBUG: Docker image: $DOCKER_IMAGE"
+          echo "DEBUG: ECR registry: $ECR_REGISTRY"
+          
+          # Auto-detect AWS region and thing name
+          if [ -z "$AWS_REGION" ]; then
+            AWS_REGION="us-east-2"
+          fi
+          if [ -z "$AWS_IOT_THING_NAME" ]; then
+            AWS_IOT_THING_NAME=$(hostname)
+          fi
+          
+          # Export AWS_REGION so Docker credential helper can access it
+          export AWS_REGION
+          
+          echo "AWS Region: $AWS_REGION"
+          echo "Thing Name: $AWS_IOT_THING_NAME"
+          
+          # Pull Docker image using ECR credential helper
+          echo "Pulling ECR image: $DOCKER_IMAGE"
+          docker pull "$DOCKER_IMAGE" || echo "Docker pull failed, using cached image"
+          
+          echo "DEBUG: Checking for existing container..."
+          if docker ps -a | grep -q "$CONTAINER_NAME"; then
+            echo "DEBUG: Found existing container, stopping and removing..."
+            docker stop "$CONTAINER_NAME" 2>&1 || echo "WARNING: Stop failed"
+            docker rm "$CONTAINER_NAME" 2>&1 || echo "WARNING: Remove failed"
+          fi
+          
+          # Get Greengrass IPC socket path (set by systemd)
+          if [ -z "$AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT" ]; then
+            GG_IPC_SOCKET="/var/lib/greengrass/gg-ipc.socket"
+          else
+            GG_IPC_SOCKET="$AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT"
+          fi
+          
+          # Run container with optimized settings for Nucleus Lite
+          # Memory limits: 128MB physical + 256MB swap (device has 512MB total RAM)
+          echo "DEBUG: Starting container with settings:"
+          echo "  - Name: $CONTAINER_NAME"
+          echo "  - Image: $DOCKER_IMAGE"
+          echo "  - Memory: 128MB"
+          echo "  - Memory+Swap: 384MB"
+          echo "  - Network: host"
+          echo "  - IPC Socket: $GG_IPC_SOCKET"
+          
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            --restart unless-stopped \
+            --network host \
+            --memory=128m \
+            --memory-swap=384m \
+            -v "$GG_IPC_SOCKET:/greengrass/ipc.socket" \
+            -e "AWS_REGION=$AWS_REGION" \
+            -e "AWS_IOT_THING_NAME=$AWS_IOT_THING_NAME" \
+            -e "AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT=/greengrass/ipc.socket" \
+            -e "SVCUID=$SVCUID" \
+            -e "HTTP_PROXY=$HTTP_PROXY" \
+            "$DOCKER_IMAGE"
+          
+          if [ $? -eq 0 ]; then
+            echo "SUCCESS: Container started successfully"
+          else
+            echo "ERROR: Container failed to start"
+            exit 1
+          fi
+          
+          echo "DEBUG: Verifying container is running..."
+          sleep 2
+          if docker ps | grep -q "$CONTAINER_NAME"; then
+            echo "SUCCESS: Container verified running"
+          else
+            echo "ERROR: Container not found in running containers"
+            echo "DEBUG: Container logs:"
+            docker logs "$CONTAINER_NAME" 2>&1 || echo "No logs available"
+            exit 1
+          fi
+          
+          # Monitor container health
+          while true; do
+            if ! docker ps --filter "name=$CONTAINER_NAME" --filter "status=running" | grep -q "$CONTAINER_NAME"; then
+              echo "ERROR: Container $CONTAINER_NAME is not running!"
+              docker logs "$CONTAINER_NAME" 2>&1 | tail -50
+              exit 1
+            fi
+            sleep 30
+          done
+      shutdown:
+        Script: |
+          #!/bin/bash
+          set -x  # Enable debug tracing
+          
+          echo "========================================="
+          echo "SecureTunneling Component Shutting Down"
+          echo "========================================="
+          
+          CONTAINER_NAME="{configuration:/containerName}"
+          echo "DEBUG: Stopping container: $CONTAINER_NAME"
+          
+          if docker stop "$CONTAINER_NAME" 2>&1; then
+            echo "DEBUG: Container stopped successfully"
+          else
+            echo "WARNING: Container stop failed or container not running"
+          fi
+          
+          if docker rm "$CONTAINER_NAME" 2>&1; then
+            echo "DEBUG: Container removed successfully"
+          else
+            echo "WARNING: Container remove failed or container not found"
+          fi
+          
+          echo "SUCCESS: Shutdown complete"
