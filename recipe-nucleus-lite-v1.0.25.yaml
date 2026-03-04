@@ -1,88 +1,66 @@
 ---
 RecipeFormatVersion: '2020-01-25'
 ComponentName: com.bartrack.SecureTunneling
-ComponentVersion: '1.0.13'
-ComponentDescription: 'AWS IoT Secure Tunneling for Greengrass Nucleus Lite 2.3.0 with Docker CE and ECR authentication'
+ComponentVersion: '1.0.25'
+ComponentDescription: 'AWS IoT Secure Tunneling for Greengrass Nucleus Lite 2.3.0 with Docker CE, ECR authentication, and IPC socket (reverted from Balena Engine)'
 ComponentPublisher: BarTrack
 ComponentDependencies:
   aws.greengrass.TokenExchangeService:
     VersionRequirement: '>=2.0.0'
-    DependencyType: SOFT
+    DependencyType: HARD
 ComponentConfiguration:
   DefaultConfiguration:
-    dockerImage: '362106343162.dkr.ecr.us-east-2.amazonaws.com/secure-tunneling:1.0.0'
+    dockerImage: '374401410677.dkr.ecr.us-east-1.amazonaws.com/secure-tunneling:1.0.25'
     containerName: 'secure-tunneling'
+    accessControl:
+      aws.greengrass.ipc.mqttproxy:
+        com.bartrack.SecureTunneling:mqttproxy:1:
+          policyDescription: Allows access to subscribe to new Secure Tunneling notifications.
+          operations:
+            - "aws.greengrass#SubscribeToIoTCore"
+          resources:
+            - "$aws/things/+/tunnels/notify"
 Manifests:
   - Platform:
       os: linux
       architecture: arm
       runtime: aws_nucleus_lite
-    Lifecycle:
-      RunWith:
-        posixUser: gg_component:gg_component
-      Run:
+    lifecycle:
+      run:
         Script: |
           #!/bin/bash
           set -x  # Enable debug tracing
           
           echo "========================================="
-          echo "SecureTunneling Component Starting v1.0.13"
+          echo "SecureTunneling Component Starting v1.0.25"
           echo "========================================="
           
           # Configuration
           CONTAINER_NAME="{configuration:/containerName}"
           DOCKER_IMAGE="{configuration:/dockerImage}"
+          ECR_REGISTRY="374401410677.dkr.ecr.us-east-1.amazonaws.com"
           
           echo "DEBUG: Container name: $CONTAINER_NAME"
           echo "DEBUG: Docker image: $DOCKER_IMAGE"
+          echo "DEBUG: ECR registry: $ECR_REGISTRY"
           
-          # Get AWS environment variables from Greengrass (TES provides these)
+          # Auto-detect AWS region and thing name
           if [ -z "$AWS_REGION" ]; then
-            AWS_REGION="us-east-2"
+            AWS_REGION="us-east-1"
           fi
           if [ -z "$AWS_IOT_THING_NAME" ]; then
             AWS_IOT_THING_NAME=$(hostname)
           fi
           
-          echo "DEBUG: AWS Region: $AWS_REGION"
-          echo "DEBUG: Thing Name: $AWS_IOT_THING_NAME"
-          
-          # Check for TES environment variables (needed for ECR authentication)
-          if [ -n "$AWS_CONTAINER_CREDENTIALS_FULL_URI" ]; then
-            echo "DEBUG: TES credentials URI: $AWS_CONTAINER_CREDENTIALS_FULL_URI"
-          else
-            echo "WARNING: AWS_CONTAINER_CREDENTIALS_FULL_URI not set"
-          fi
-          
-          # Check Docker availability
-          echo "DEBUG: Checking docker availability..."
-          if ! command -v docker > /dev/null 2>&1; then
-            echo "ERROR: docker command not found!"
-            exit 1
-          fi
-          
-          echo "DEBUG: docker version:"
-          docker --version || echo "WARNING: Could not get docker version"
-          
-          # Export TES environment variables for ECR credential helper
-          # These are automatically set by Greengrass for component processes
+          # Export AWS_REGION so Docker credential helper can access it
           export AWS_REGION
-          export AWS_CONTAINER_CREDENTIALS_FULL_URI
-          export AWS_CONTAINER_AUTHORIZATION_TOKEN
+          
+          echo "AWS Region: $AWS_REGION"
+          echo "Thing Name: $AWS_IOT_THING_NAME"
           
           # Pull Docker image using ECR credential helper
-          echo "DEBUG: Pulling ECR image: $DOCKER_IMAGE"
-          echo "DEBUG: ECR credential helper will use TES for authentication"
-          if docker pull "$DOCKER_IMAGE"; then
-            echo "DEBUG: Image pull successful"
-          else
-            echo "WARNING: Image pull failed, attempting to use cached image"
-            if ! docker images | grep -q "$DOCKER_IMAGE"; then
-              echo "ERROR: No cached image found for $DOCKER_IMAGE"
-              echo "ERROR: ECR authentication failed - check TES is running and ECR credential helper is configured"
-              exit 1
-            fi
-          fi
+          echo "Pulling ECR image: $DOCKER_IMAGE"
+          docker pull "$DOCKER_IMAGE" || echo "Docker pull failed, using cached image"
           
           echo "DEBUG: Checking for existing container..."
           if docker ps -a | grep -q "$CONTAINER_NAME"; then
@@ -91,22 +69,38 @@ Manifests:
             docker rm "$CONTAINER_NAME" 2>&1 || echo "WARNING: Remove failed"
           fi
           
+          # Get Greengrass IPC socket path (set by systemd)
+          if [ -z "$AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT" ]; then
+            GG_IPC_SOCKET="/var/lib/greengrass/gg-ipc.socket"
+          else
+            GG_IPC_SOCKET="$AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT"
+          fi
+          
           # Run container with optimized settings for Nucleus Lite
+          # Memory limits: 64MB physical + 128MB swap (device has 512MB total RAM)
           echo "DEBUG: Starting container with settings:"
           echo "  - Name: $CONTAINER_NAME"
           echo "  - Image: $DOCKER_IMAGE"
-          echo "  - Memory: 512MB"
+          echo "  - Memory: 64MB"
+          echo "  - Memory+Swap: 192MB"
           echo "  - Network: host"
+          echo "  - IPC Socket: $GG_IPC_SOCKET"
           
-          if docker run -d \
+          docker run -d \
             --name "$CONTAINER_NAME" \
             --restart unless-stopped \
             --network host \
-            --memory=512m \
-            --memory-swap=512m \
-            -e AWS_REGION="$AWS_REGION" \
-            -e AWS_IOT_THING_NAME="$AWS_IOT_THING_NAME" \
-            "$DOCKER_IMAGE"; then
+            --memory=64m \
+            --memory-swap=192m \
+            -v "$GG_IPC_SOCKET:/greengrass/ipc.socket" \
+            -e "AWS_REGION=$AWS_REGION" \
+            -e "AWS_IOT_THING_NAME=$AWS_IOT_THING_NAME" \
+            -e "AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT=/greengrass/ipc.socket" \
+            -e "SVCUID=$SVCUID" \
+            -e "HTTP_PROXY=$HTTP_PROXY" \
+            "$DOCKER_IMAGE"
+          
+          if [ $? -eq 0 ]; then
             echo "SUCCESS: Container started successfully"
           else
             echo "ERROR: Container failed to start"
@@ -133,7 +127,7 @@ Manifests:
             fi
             sleep 30
           done
-      Shutdown:
+      shutdown:
         Script: |
           #!/bin/bash
           set -x  # Enable debug tracing

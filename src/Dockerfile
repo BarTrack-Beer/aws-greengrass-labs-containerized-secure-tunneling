@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 ubuntu:22.04 AS builder
+FROM --platform=linux/arm/v7 ubuntu:22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -27,12 +27,12 @@ RUN git clone https://github.com/awslabs/aws-iot-device-client.git && \
 
 ################################################################################
 
-FROM --platform=linux/amd64 ubuntu:22.04
+FROM --platform=linux/arm/v7 ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=true
 
-RUN apt-get update && apt-get install -y python3 python3-pip openssl
+RUN apt-get update && apt-get install -y python3 python3-pip openssl cmake build-essential
 RUN python3 -m pip install awsiotsdk==1.12.5
 
 RUN mkdir /app

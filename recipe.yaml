@@ -5,8 +5,6 @@ ComponentVersion: '1.0.1'
 ComponentDescription: A component for Secure Tunneling in a customized container.
 ComponentPublisher: Amazon
 ComponentDependencies:
-  aws.greengrass.DockerApplicationManager:
-    VersionRequirement: ~2.0.0
   aws.greengrass.TokenExchangeService:
     VersionRequirement: ~2.0.0
 ComponentConfiguration:
